@@ -1,8 +1,8 @@
 // *************************************************************************************
 // TimingLight.ino - Arduino Program for Toastmasters Automatic Timing Light
 //    Author:         John Miller
-//    Revision:       1.0.0
-//    Date:           6/26/2017
+//    Revision:       1.1.0
+//    Date:           7/23/2017
 //    Project Source: https://github.com/jpsrmiller/auto-timing-light
 // 
 // This Arduino program performs all functions for the Automatic Timing Light including:
@@ -17,6 +17,9 @@
 //     o Pushbutton for Manually Changing Light
 //     o 4-Channel 5-Volt Relay Module
 //
+// Rotary Encoder and Pushbutton use Arduino pins for the GND and +5V so that all hardware
+//   can be connected directly to the Arduino, not requiring a separate breadboard.
+//
 // *** Detailed Decription of Timing Light Operation ***
 //  - LCD Displays the Selected Speech Time and the Elapsed Time.  For example:
 //              ----------------
@@ -26,7 +29,7 @@
 //  - User turns the Rotary Encoder Left or Right to select the Speech Time.
 //    Speech time limits are defined in 'time_limits' array.  Example speech
 //    times are 1-2 minutes, 2-3 minutes, 3-5 minutes, etc.  Turning Rotary
-//    all the way to the Left will select Manual Model
+//    all the way to the Left will select Manual Mode
 //  - Press the Rotary Encoder Select Button to Start or Stop the Timer.
 //  - Hold down the Rotary Encoder Select Button to Reset the Timer to 0:00
 //  - While the Timer is running, and not in Manual Mode the Lights turn On and Off 
@@ -37,7 +40,7 @@
 //          At maximum time (example 7 minutes) RED light turns On (Yellow/Green are Off)
 //  - While in Manual Mode or while the timer is Stopped and the time is 0:00, the Light
 //    is changed by pressing the Manual button.  Light is advanced as follows:
-//           NONE --> GREEN --> YELLOW --> RED
+//           NONE --> GREEN --> YELLOW --> RED  --> NONE
 //  - Selected time Limits are stored in EEPROM and loaded on program start-up.
 //    In other words, the program "remembers" the last time limit selected
 //
@@ -60,19 +63,22 @@
 #define LCD_I2C_ADDRESS 0x3F
 
 // Define the IO Pins Used
-#define PIN_ROTARY_CLK				2		// Used for generating interrupts using CLK signal
-#define PIN_ROTARY_DAT				3		// Used for reading DT signal
-#define PIN_ROTARY_SW	  			4		// Used for the Rotary push button switch
-#define PIN_LIGHT_GREEN				5		// Output pin for Green Light
-#define PIN_LIGHT_YELLOW			6		// Output pin for Yellow Light
-#define PIN_LIGHT_RED		  		7		// Output pin for Red Light
-#define PIN_MANUAL_BUTTON			14		// Pushbutton to change light in Manual Mode
+#define PIN_ROTARY_CLK		2   // Used for generating interrupts using CLK signal
+#define PIN_ROTARY_DAT		3   // Used for reading DT signal
+#define PIN_ROTARY_SW	  	4   // Used for the Rotary push button switch
+#define PIN_ROTARY_5V         	5   // Set to HIGH to be the 5V pin for the Rotary Encoder
+#define PIN_ROTARY_GND        	6   // Set to LOW to be the GND pin for the Rotary Encoder
+#define PIN_MANUAL_GND        	8   // Set to LOW to be the GND pin for the Manual Button
+#define PIN_MANUAL_BUTTON     	9   // Pushbutton to change light in Manual Mode
+#define PIN_LIGHT_GREEN		14  // Output pin for Green Light
+#define PIN_LIGHT_YELLOW	15  // Output pin for Yellow Light
+#define PIN_LIGHT_RED		16  // Output pin for Red Light
 
 // Used to specify which light is currently on
-#define LIGHT_NONE	  				0		// All Lights Off
-#define LIGHT_GREEN		  			1		// Green Light On
-#define LIGHT_YELLOW	  			2		// Yellow Light On
-#define LIGHT_RED				    	3		// Red Light On
+#define LIGHT_NONE	  	0   // All Lights Off
+#define LIGHT_GREEN		1   // Green Light On
+#define LIGHT_YELLOW	  	2   // Yellow Light On
+#define LIGHT_RED		3   // Red Light On
 
 //EEPROM Address for storing the last selected time
 #define TIME_LIM_INDEX_EEPROM_ADDRESS	0
@@ -111,29 +117,61 @@ int manual_mode_light_select;   // In Manual mode, defines the Light selected
 int rotary_disabled;            // TRUE to Disable Rotary Encoder
 int old_light_index;            // Light that was on at previous cycle
 
+// Used for the Rotary Encoder interrupt routines PinA() and PinB()
+volatile byte aFlag = 0; // lets us know when we're expecting a rising edge on pinA 
+                         // to signal that the encoder has arrived at a detent
+volatile byte bFlag = 0; // lets us know when we're expecting a rising edge on pinB 
+                         // to signal that the encoder has arrived at a detent 
+                         // (opposite direction to when aFlag is set)
+volatile byte reading = 0; //somewhere to store the direct values we read from our interrupt 
+                           // pins before checking to see if we have moved a whole detent
+
+
 // ****************************************************************************
-// rotaryClick() - Called by the Interrupt pin, whenever the Rotary
-//                 Encoder was turned
+// PinA() - Called by the Interrupt pin when the Rotary Encoder Turned
+//    Routine taken from:  
+//    https://exploreembedded.com/wiki/Interactive_Menus_for_your_project_with_a_Display_and_an_Encoder
 // ****************************************************************************
-void rotaryClick() {                    
-
-	static unsigned long                lastInterruptTime = 0;
-	unsigned long                       interruptTime = millis();
-
-	if (rotary_disabled) return;
-
-	// If interrupts come faster than 5ms, assume it's a bounce and ignore
-	if (interruptTime - lastInterruptTime > 5) {
-		// A HIGH value on the Rotary DATA pin means that the Rotary Encoder was
-    // turned to the Left (Counter-Clockwise).  A LOW value on Rotary DATA
-    // means that the Rotary Encoder was turned to the Right (Clockwise)		
-		if (digitalRead(PIN_ROTARY_DAT))
-			rotaryDown(); 
-		else
-			rotaryUp();
-	}
-	lastInterruptTime = interruptTime;
+void PinA(){
+  if (rotary_disabled) return;
+  
+  cli(); //stop interrupts happening before we read pin values
+  // read all eight pin values then strip away all but pinA and pinB's values
+  reading = PIND & 0xC; 
+  
+  //check that both pins at detent (HIGH) and that we are expecting detent on this pin's rising edge
+  if(reading == B00001100 && aFlag) { 
+    rotaryUp();
+    bFlag = 0; //reset flags for the next turn
+    aFlag = 0; //reset flags for the next turn
+  }
+  //signal that we're expecting pinB to signal the transition to detent from free rotation
+  else if (reading == B00000100) bFlag = 1; 
+  sei(); //restart interrupts
 }
+
+// ****************************************************************************
+// PinB() - Called by the Interrupt pin when the Rotary Encoder Turned
+//    Routine taken from:  
+//    https://exploreembedded.com/wiki/Interactive_Menus_for_your_project_with_a_Display_and_an_Encoder
+// ****************************************************************************
+void PinB(){
+  if (rotary_disabled) return;
+  
+  cli(); //stop interrupts happening before we read pin values
+  //read all eight pin values then strip away all but pinA and pinB's values
+  reading = PIND & 0xC;
+  //check that both pins at detent (HIGH) and that we are expecting detent on this pin's rising edge 
+  if (reading == B00001100 && bFlag) { 
+    rotaryDown();
+    bFlag = 0; //reset flags for the next turn
+    aFlag = 0; //reset flags for the next turn
+  }
+  //signal that we're expecting pinA to signal the transition to detent from free rotation
+  else if (reading == B00001000) aFlag = 1; 
+  sei(); //restart interrupts
+}
+
 
 // ****************************************************************************
 // setup() - Initialization Function
@@ -145,13 +183,20 @@ void setup()
 	lcd.backlight();
 
   // Set the Directions of the I/O Pins
-	pinMode(PIN_ROTARY_CLK, INPUT);
-	pinMode(PIN_ROTARY_DAT, INPUT);
-	pinMode(PIN_ROTARY_SW, INPUT);
+	pinMode(PIN_ROTARY_CLK, INPUT_PULLUP);
+	pinMode(PIN_ROTARY_DAT, INPUT_PULLUP);
+	pinMode(PIN_ROTARY_SW, INPUT_PULLUP);
 	pinMode(PIN_MANUAL_BUTTON, INPUT_PULLUP);
 	pinMode(PIN_LIGHT_GREEN, OUTPUT);
 	pinMode(PIN_LIGHT_YELLOW, OUTPUT);
 	pinMode(PIN_LIGHT_RED, OUTPUT);
+
+  pinMode(PIN_ROTARY_GND, OUTPUT);
+  pinMode(PIN_ROTARY_5V, OUTPUT);
+  pinMode(PIN_MANUAL_GND, OUTPUT);
+  digitalWrite(PIN_ROTARY_GND, LOW);
+  digitalWrite(PIN_ROTARY_5V, HIGH);
+  digitalWrite(PIN_MANUAL_GND, LOW);
 
 	// Relay module takes IN=HIGH for Open and IN=LOW for Close
 	digitalWrite(PIN_LIGHT_GREEN, HIGH);
@@ -162,8 +207,10 @@ void setup()
 	old_light_index = LIGHT_NONE;
 	manual_mode_light_select = LIGHT_NONE;
 
-  // Interrupt to detect Clicks on the Rotary Encoder
-	attachInterrupt(0, rotaryClick, FALLING);
+  // set an interrupt on PinA and PinB, looking for a rising edge signal and 
+  // executing the "PinA" and "PinB" Interrupt Service Routines
+  attachInterrupt(0,PinA,RISING); 
+  attachInterrupt(1,PinB,RISING); 
 
   // Initialize the Manual Light Advance Button
 	btnMan.attachClick(&btnManClick);
@@ -311,7 +358,8 @@ void refreshElapsedTime() {
 	lcd.print(F(":"));
 	if (sec<10) lcd.print(F("0"));
 	lcd.print(sec);
-	lcd.print(F("    "));
+  lcd.print(F("    "));
+  
 }
 
 // ****************************************************************************
