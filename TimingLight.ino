@@ -3,7 +3,8 @@
 //    Author:         John Miller
 //    Revision:       1.1.0
 //    Date:           7/23/2017
-//    Project Source: https://github.com/jpsrmiller/auto-timing-light
+//    Project Source:  https://github.com/jpsrmiller/auto-timing-light
+//    Project Website: www.autotiminglight.com
 // 
 // This Arduino program performs all functions for the Automatic Timing Light including:
 //     o Selection of Time Limits (e.g. 5 to 7 min) or Manual Mode
